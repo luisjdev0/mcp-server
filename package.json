@@ -1,0 +1,31 @@
+{
+  "name": "mcp-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Gateway Express que aloja múltiples servidores MCP bajo autenticación por token.",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.0.0",
+    "http-proxy-middleware": "^4.2.0",
+    "pino": "^9.5.0",
+    "pino-http": "^10.3.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

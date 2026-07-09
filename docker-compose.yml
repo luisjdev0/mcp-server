@@ -1,0 +1,39 @@
+services:
+  app:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      - appflowy-mcp
+      - dbhub-mcp
+    # Solo se publica en localhost: el Caddy ya instalado en el servidor
+    # hace reverse_proxy hacia 127.0.0.1:${HOST_PORT} y gestiona TLS/dominio.
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT:-3000}:3000"
+
+  # MCP de terceros (https://github.com/CAREEMER/appflowy-mcp). No se publica
+  # a host: solo es alcanzable por "app" dentro de la red interna de compose,
+  # que la reenvía bajo /appflowy con su propia capa de auth.
+  appflowy-mcp:
+    image: m2n2/appflowy-mcp:latest
+    restart: unless-stopped
+    environment:
+      APPFLOWY_BASE_URL: ${APPFLOWY_BASE_URL}
+      APPFLOWY_EMAIL: ${APPFLOWY_EMAIL}
+      APPFLOWY_PASSWORD: ${APPFLOWY_PASSWORD}
+      APPFLOWY_MCP_TOKENS: '[{"token":"${APPFLOWY_MCP_INTERNAL_TOKEN}","name":"gateway","scopes":[]}]'
+
+  # MCP de terceros (https://github.com/bytebase/dbhub). Tampoco se publica a
+  # host: DBHub no autentica a sus clientes HTTP por diseño, así que solo debe
+  # ser alcanzable dentro de la red de compose, detrás de nuestra propia auth
+  # en /dbhub.
+  dbhub-mcp:
+    image: bytebase/dbhub:latest
+    restart: unless-stopped
+    command:
+      - --transport
+      - http
+      - --port
+      - "8080"
+      - --dsn
+      - ${DBHUB_DSN}
