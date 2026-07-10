@@ -7,6 +7,7 @@ import { logger } from "./logger.js";
 import { registry } from "./registry/index.js";
 import { mountMcp } from "./http/mountMcp.js";
 import { mountProxy } from "./http/mountProxy.js";
+import { mountOAuth } from "./http/mountOAuth.js";
 import { requireAuth } from "./auth/middleware.js";
 
 const app = express();
@@ -20,6 +21,10 @@ app.use(pinoHttp({ logger }));
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
+
+// Authorization server OAuth 2.1 + DCR (opcional, ver auth/oauth.ts): habilita
+// registrar este gateway como custom connector de cuenta en claude.ai.
+mountOAuth(app);
 
 for (const entry of registry) {
   const mcpLimiter = rateLimit({ windowMs: 60_000, limit: 120 });

@@ -13,7 +13,11 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 
-RUN useradd --system --no-create-home appuser
+# ./data persiste los clientes OAuth registrados dinámicamente (ver auth/oauth.ts)
+# para que un reinicio del contenedor no fuerce reconectar el custom connector.
+RUN useradd --system --no-create-home appuser \
+  && mkdir -p /app/data \
+  && chown appuser:appuser /app/data
 USER appuser
 
 EXPOSE 3000

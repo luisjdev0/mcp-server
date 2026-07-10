@@ -48,6 +48,56 @@ mcp.dominio.com {
 }
 ```
 
+## Autenticación: token estático vs. OAuth (custom connector de cuenta)
+
+Hay dos formas de autenticarse contra este gateway, pensadas para clientes distintos:
+
+- **Token estático (`MCP_AUTH_TOKENS`)**: pensado para clientes "locales" — Claude
+  Code, `claude_desktop_config.json` con [`mcp-remote`](https://www.npmjs.com/package/mcp-remote)
+  como bridge, `curl`, el MCP Inspector, etc. Es el mecanismo original de este
+  gateway (ver sección de variables de entorno arriba).
+- **OAuth 2.1 + Dynamic Client Registration (`OAUTH_*`)**: necesario para registrar
+  este gateway como **custom connector a nivel de cuenta en claude.ai**
+  (Settings → Connectors → Add custom connector). Ese flujo, al no pasar por
+  ningún archivo de config local, solo sabe hacer el handshake OAuth — no hay
+  forma de pegar un Bearer token estático ahí. Este repo implementa un
+  authorization server mínimo (`src/auth/oauth.ts` + `src/http/mountOAuth.ts`)
+  para un único usuario administrador: no hay noción de múltiples cuentas, un
+  login válido da acceso total a todos los MCPs del gateway.
+
+Ambos mecanismos conviven: `requireAuth` (`src/auth/middleware.ts`) acepta
+cualquiera de los dos en el header `Authorization: Bearer <token>`.
+
+### Activar el custom connector de cuenta en claude.ai
+
+1. Completa en `.env`: `OAUTH_JWT_SECRET` (`openssl rand -hex 32`),
+   `OAUTH_ADMIN_USER` y `OAUTH_ADMIN_PASSWORD`. Si falta cualquiera, el
+   authorization server queda deshabilitado y el resto del gateway sigue
+   funcionando normal.
+2. `docker compose up -d --build` (el volumen `oauth_data` persiste los
+   clientes que claude.ai registre dinámicamente, para no perderlos en cada
+   reinicio del contenedor).
+3. En claude.ai: **Settings → Connectors → Add custom connector**, con la URL
+   del MCP que quieras conectar, ej. `https://mcp.tudominio.com/appflowy`.
+4. Claude.ai se auto-registra como cliente OAuth (Dynamic Client Registration)
+   y te redirige a una pantalla de login (`/authorize`) servida por este
+   gateway. Ingresa `OAUTH_ADMIN_USER`/`OAUTH_ADMIN_PASSWORD`.
+5. Listo: claude.ai guarda el access/refresh token y los renueva solo. El
+   login vale para **todo el gateway** (cualquier path `/echo`, `/appflowy`,
+   `/dbhub`), así que solo hace falta hacerlo una vez aunque agregues el
+   conector para más de un MCP.
+
+**Notas de seguridad:**
+
+- Los access tokens (JWT, 1h) y refresh tokens (JWT, 90 días) están firmados
+  con `OAUTH_JWT_SECRET`; no hay lista de revocación — para invalidar todo,
+  rota `OAUTH_JWT_SECRET` (cierra la sesión de todos los conectores
+  registrados, no solo uno).
+- `OAUTH_ADMIN_PASSWORD` viaja en texto plano en `.env`, igual que
+  `APPFLOWY_PASSWORD`: nunca subas `.env` al repo (ya está en `.gitignore`).
+- Al ser un único usuario, no hay scopes por conector: todo login OAuth
+  equivale a un token estático con scope `*`.
+
 ## Cómo agregar un MCP nuevo
 
 1. Copia `src/servers/_template` a `src/servers/<nombre>/index.ts`.

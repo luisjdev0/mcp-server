@@ -10,6 +10,10 @@ services:
     # hace reverse_proxy hacia 127.0.0.1:${HOST_PORT} y gestiona TLS/dominio.
     ports:
       - "${HOST_BIND:-127.0.0.1}:${HOST_PORT:-3000}:3000"
+    volumes:
+      # Persiste los clientes OAuth (custom connector) registrados dinámicamente
+      # por claude.ai (ver auth/oauth.ts) entre reinicios del contenedor.
+      - oauth_data:/app/data
 
   # MCP de terceros (https://github.com/CAREEMER/appflowy-mcp). No se publica
   # a host: solo es alcanzable por "app" dentro de la red interna de compose,
@@ -37,3 +41,6 @@ services:
       - "8080"
       - --dsn
       - ${DBHUB_DSN}
+
+volumes:
+  oauth_data:
