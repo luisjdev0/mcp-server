@@ -29,6 +29,24 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
+/**
+ * Chrome aplica `form-action` no solo al destino inmediato del <form>, sino
+ * también a cualquier redirect que resulte de esa petición (para evitar que un
+ * endpoint same-origin sirva de trampolín a otro sitio). Como el login exitoso
+ * responde con un 302 hacia el `redirect_uri` del cliente (otro origen, ej.
+ * claude.ai), hay que reemplazar el `form-action 'self'` por defecto de helmet
+ * en esta página puntual para incluir ese origen ya validado contra el cliente
+ * registrado — si no, el navegador bloquea el redirect final tras un login
+ * exitoso aunque la petición en sí haya funcionado (devuelve 302 igual).
+ */
+function setAuthorizeCsp(res: Response, redirectUri: string): void {
+  const { origin } = new URL(redirectUri);
+  res.setHeader(
+    "Content-Security-Policy",
+    `default-src 'self'; base-uri 'self'; form-action 'self' ${origin}; frame-ancestors 'none'`,
+  );
+}
+
 function renderLoginPage(params: {
   clientId: string;
   redirectUri: string;
@@ -112,6 +130,19 @@ export function mountOAuth(app: Express): void {
       return;
     }
 
+    const allValidUrls = redirectUris.every((uri) => {
+      try {
+        new URL(uri);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (!allValidUrls) {
+      res.status(400).json({ error: "invalid_redirect_uri", error_description: "redirect_uris debe contener URLs absolutas" });
+      return;
+    }
+
     const client = registerClient(redirectUris, req.body?.client_name);
 
     res.status(201).json({
@@ -146,6 +177,7 @@ export function mountOAuth(app: Express): void {
       return;
     }
 
+    setAuthorizeCsp(res, redirect_uri);
     res.type("html").send(
       renderLoginPage({
         clientId: client_id,
@@ -166,6 +198,7 @@ export function mountOAuth(app: Express): void {
     }
 
     if (!verifyAdminCredentials(username ?? "", password ?? "")) {
+      setAuthorizeCsp(res, redirect_uri);
       res.status(401).type("html").send(
         renderLoginPage({
           clientId: client_id,
