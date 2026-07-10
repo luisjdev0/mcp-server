@@ -9,7 +9,7 @@ services:
     # Solo se publica en localhost: el Caddy ya instalado en el servidor
     # hace reverse_proxy hacia 127.0.0.1:${HOST_PORT} y gestiona TLS/dominio.
     ports:
-      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT:-3000}:3000"
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT:-3000}:${PORT:-3000}"
     volumes:
       # Persiste los clientes OAuth (custom connector) registrados dinámicamente
       # por claude.ai (ver auth/oauth.ts) entre reinicios del contenedor.
