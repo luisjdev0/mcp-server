@@ -1,0 +1,6 @@
+# analytics-mcp fijado a una versión concreta (no rango abierto): es un paquete
+# oficial de Google, pero al correr en el servidor con acceso a credenciales
+# reales conviene actualizarlo a propósito, no automáticamente en cada build.
+analytics-mcp==0.6.0
+starlette>=0.37,<1
+uvicorn[standard]>=0.30,<1

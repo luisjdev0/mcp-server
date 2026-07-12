@@ -6,6 +6,7 @@ services:
     depends_on:
       - appflowy-mcp
       - dbhub-mcp
+      - analytics-mcp
     # Solo se publica en localhost: el Caddy ya instalado en el servidor
     # hace reverse_proxy hacia 127.0.0.1:${HOST_PORT} y gestiona TLS/dominio.
     ports:
@@ -41,6 +42,24 @@ services:
       - "8080"
       - --dsn
       - ${DBHUB_DSN}
+
+  # MCP oficial de Google (https://github.com/googleanalytics/google-analytics-mcp),
+  # solo lectura (scope analytics.readonly). Ese paquete solo habla stdio, así
+  # que este servicio lo construye y lo envuelve en Streamable HTTP con el SDK
+  # oficial de MCP para Python (ver docker/analytics-mcp/app.py) en vez de usar
+  # un bridge de terceros. Tampoco se publica a host: solo alcanzable por "app"
+  # bajo /analytics, con su propia capa de auth (token interno + bearer del
+  # gateway) y las credenciales de una service account de GCP dedicada,
+  # de solo lectura, montadas como archivo de solo lectura (nunca en la imagen).
+  analytics-mcp:
+    build: ./docker/analytics-mcp
+    restart: unless-stopped
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/ga-sa-key.json
+      GOOGLE_PROJECT_ID: ${GOOGLE_ANALYTICS_PROJECT_ID}
+      ANALYTICS_MCP_INTERNAL_TOKEN: ${ANALYTICS_MCP_INTERNAL_TOKEN}
+    volumes:
+      - ${ANALYTICS_MCP_SA_KEY_PATH}:/secrets/ga-sa-key.json:ro
 
 volumes:
   oauth_data:

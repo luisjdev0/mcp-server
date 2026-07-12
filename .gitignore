@@ -5,3 +5,6 @@ dist
 !.env.example
 *.log
 /data
+/secrets
+__pycache__
+*.pyc
