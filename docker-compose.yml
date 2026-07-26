@@ -43,14 +43,21 @@ services:
       - --dsn
       - ${DBHUB_DSN}
 
-  # MCP oficial de Google (https://github.com/googleanalytics/google-analytics-mcp),
-  # solo lectura (scope analytics.readonly). Ese paquete solo habla stdio, así
-  # que este servicio lo construye y lo envuelve en Streamable HTTP con el SDK
-  # oficial de MCP para Python (ver docker/analytics-mcp/app.py) en vez de usar
-  # un bridge de terceros. Tampoco se publica a host: solo alcanzable por "app"
+  # MCP oficial de Google (https://github.com/googleanalytics/google-analytics-mcp)
+  # más tools de escritura propias (ver docker/analytics-mcp/admin_write_tools.py):
+  # el paquete oficial solo trae reporting/lectura (scope analytics.readonly),
+  # así que este servicio le añade un segundo cliente de Admin API con scope
+  # analytics.edit para poder crear/editar/archivar custom dimensions, custom
+  # metrics, key events, audiences, data streams, la config de la propiedad y
+  # los vínculos con Google Ads. Ese paquete solo habla stdio, así que este
+  # servicio lo construye y lo envuelve en Streamable HTTP con el SDK oficial
+  # de MCP para Python (ver docker/analytics-mcp/app.py) en vez de usar un
+  # bridge de terceros. Tampoco se publica a host: solo alcanzable por "app"
   # bajo /analytics, con su propia capa de auth (token interno + bearer del
   # gateway) y las credenciales de una service account de GCP dedicada,
-  # de solo lectura, montadas como archivo de solo lectura (nunca en la imagen).
+  # montadas como archivo de solo lectura (nunca en la imagen). Esa service
+  # account necesita rol Editor (no solo Viewer) en las propiedades GA4 que
+  # deba poder modificar.
   analytics-mcp:
     build: ./docker/analytics-mcp
     restart: unless-stopped

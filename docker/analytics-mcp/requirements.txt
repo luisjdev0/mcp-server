@@ -1,6 +1,9 @@
 # analytics-mcp fijado a una versión concreta (no rango abierto): es un paquete
 # oficial de Google, pero al correr en el servidor con acceso a credenciales
 # reales conviene actualizarlo a propósito, no automáticamente en cada build.
+# admin_write_tools.py (tools de escritura propias, ver ese archivo) reusa el
+# cliente de Admin API (google-analytics-admin) y el SDK de ADK (google-adk)
+# que ya vienen como dependencias transitivas de analytics-mcp.
 analytics-mcp==0.6.0
 starlette>=0.37,<1
 uvicorn[standard]>=0.30,<1

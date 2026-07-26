@@ -9,8 +9,11 @@ import { logger } from "../../logger.js";
  * `analytics-mcp`, ver docker/analytics-mcp/) que reexpone el mismo Server
  * object sobre Streamable HTTP con el SDK oficial de MCP para Python — no es
  * un binario de terceros que ya hable HTTP como appflowy/dbhub, sino nuestro
- * wrapper alrededor de un paquete oficial. Acceso de solo lectura
- * (scope analytics.readonly) vía una service account de GCP dedicada.
+ * wrapper alrededor de un paquete oficial. El sidecar le añade además tools
+ * de escritura propias (ver docker/analytics-mcp/admin_write_tools.py) que el
+ * paquete oficial no trae, así que el acceso combina reporting de solo
+ * lectura (scope analytics.readonly) con administración vía Admin API
+ * (scope analytics.edit), ambos con una service account de GCP dedicada.
  */
 const analyticsEnvSchema = z.object({
   ANALYTICS_MCP_TARGET: z.string().url().default("http://analytics-mcp:8080/mcp"),
