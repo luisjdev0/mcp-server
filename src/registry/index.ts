@@ -2,6 +2,7 @@ import { createEchoServer } from "../servers/echo/index.js";
 import { appflowyProxyEntry } from "../servers/appflowy/index.js";
 import { dbhubProxyEntry } from "../servers/dbhub/index.js";
 import { analyticsProxyEntry } from "../servers/analytics/index.js";
+import { cerebroEntry } from "../servers/cerebro/index.js";
 import type { McpRegistryEntry } from "./types.js";
 
 export type { LocalMcpEntry, ProxiedMcpEntry, McpRegistryEntry } from "./types.js";
@@ -23,4 +24,5 @@ export const registry: McpRegistryEntry[] = [
   ...(appflowyProxyEntry ? [appflowyProxyEntry] : []),
   ...(dbhubProxyEntry ? [dbhubProxyEntry] : []),
   ...(analyticsProxyEntry ? [analyticsProxyEntry] : []),
+  ...(cerebroEntry ? [cerebroEntry] : []),
 ];

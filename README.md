@@ -192,3 +192,28 @@ Para activarlo:
    `https://mcp.dominio.com/dbhub` con `Authorization: Bearer <su-token>`.
 
 Si `DBHUB_DSN` no está definido, este MCP se omite del arranque.
+
+### `/cerebro` (local, reimplementación contra la API de [KnowledgeOS](https://github.com/luisjdev0/cerebro), privado)
+
+A diferencia de `/appflowy`, `/dbhub` y `/analytics`, este MCP **no es un proxy a un
+sidecar**: KnowledgeOS (memoria persistente self-hosted, Postgres+pgvector) ya corre
+como su propio servicio en otro lugar (ver `DEPLOY.md` de ese repo), y su cliente MCP
+oficial (`knowledgeos-mcp`) solo habla stdio. Como ese repo es privado y no se
+modifica desde aquí, `src/servers/cerebro` reimplementa los mismos 10 tools
+(`memory_search`, `memory_remember`, `memory_update`, `memory_forget`, `memory_link`,
+`memory_related`, `memory_timeline`, `memory_contexts`, `memory_create_context`,
+`memory_stats`) hablando HTTP directo contra esa API — mismo contrato, mismos
+endpoints, sin lógica de negocio propia (vive toda en la API de KnowledgeOS).
+
+Para activarlo:
+
+1. Completa en `.env`: `KNOWLEDGEOS_API_URL` (URL de la API ya desplegada) y
+   `KNOWLEDGEOS_API_TOKEN` (un token con scopes `read,write,admin` y sin
+   `--contexts` -- acceso completo a todos los contextos -- creado con
+   `knowledgeos token create mcp-gateway --scopes read,write,admin`).
+2. Da a un token de `MCP_AUTH_TOKENS` acceso al scope `cerebro`.
+3. El cliente MCP se conecta a `https://mcp.dominio.com/cerebro` con
+   `Authorization: Bearer <su-token>` — nunca ve `KNOWLEDGEOS_API_TOKEN`.
+
+Si `KNOWLEDGEOS_API_URL` o `KNOWLEDGEOS_API_TOKEN` no están definidos, este MCP se
+omite del arranque.
