@@ -5,5 +5,15 @@
 # cliente de Admin API (google-analytics-admin) y el SDK de ADK (google-adk)
 # que ya vienen como dependencias transitivas de analytics-mcp.
 analytics-mcp==0.6.0
+
+# analytics-mcp==0.6.0 declara "mcp>=1.24.0" (rango abierto). mcp 2.0.0 renombró
+# Tool.inputSchema -> input_schema (breaking change), lo que rompe
+# analytics_mcp/coordinator.py:125 (`if tool.inputSchema == {}`) al importar y
+# hace que el contenedor entre en crash loop -- exactamente lo que le pasó a este
+# servicio el 2026-08-17 (`AttributeError: 'Tool' object has no attribute
+# 'inputSchema'`). Fijado a la última serie 1.x compatible hasta que analytics-mcp
+# publique una versión que soporte mcp 2.x.
+mcp>=1.24.0,<2
+
 starlette>=0.37,<1
 uvicorn[standard]>=0.30,<1
