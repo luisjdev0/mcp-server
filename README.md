@@ -193,27 +193,41 @@ Para activarlo:
 
 Si `DBHUB_DSN` no está definido, este MCP se omite del arranque.
 
-### `/cerebro` (local, reimplementación contra la API de [KnowledgeOS](https://github.com/luisjdev0/cerebro), privado)
+### `/cerebro` (local, reimplementación contra las APIs del ecosistema [cerebro](https://github.com/luisjdev0/cerebro), privado)
 
 A diferencia de `/appflowy`, `/dbhub` y `/analytics`, este MCP **no es un proxy a un
-sidecar**: KnowledgeOS (memoria persistente self-hosted, Postgres+pgvector) ya corre
-como su propio servicio en otro lugar (ver `DEPLOY.md` de ese repo), y su cliente MCP
-oficial (`knowledgeos-mcp`) solo habla stdio. Como ese repo es privado y no se
-modifica desde aquí, `src/servers/cerebro` reimplementa los mismos 10 tools
-(`memory_search`, `memory_remember`, `memory_update`, `memory_forget`, `memory_link`,
-`memory_related`, `memory_timeline`, `memory_contexts`, `memory_create_context`,
-`memory_stats`) hablando HTTP directo contra esa API — mismo contrato, mismos
-endpoints, sin lógica de negocio propia (vive toda en la API de KnowledgeOS).
+sidecar**: el ecosistema cerebro (monorepo de 5 paquetes; antes un único paquete
+`knowledgeos`) ya corre como sus propios servicios en otro lugar (ver `DEPLOY.md` de
+ese repo), y su cliente MCP oficial (`cerebro-mcp`) solo habla stdio. Como ese repo
+es privado y no se modifica desde aquí, `src/servers/cerebro` reimplementa los mismos
+tools hablando HTTP directo contra esas APIs — mismo contrato, mismos endpoints, sin
+lógica de negocio propia (vive toda en `cerebro-memory`/`cerebro-docs`):
 
-Para activarlo:
+- `memory_*` (siempre activas si el MCP está habilitado): `memory_search`,
+  `memory_remember`, `memory_update`, `memory_forget`, `memory_link`,
+  `memory_related`, `memory_timeline`, `memory_contexts`, `memory_create_context`,
+  `memory_stats` — contra la API de `cerebro-memory` (memoria persistente,
+  Postgres+pgvector).
+- `docs_*` (solo si `CEREBRO_DOCS_URL` está configurada): `docs_create_category`,
+  `docs_categories`, `docs_save`, `docs_get`, `docs_search`, `docs_list`,
+  `docs_update`, `docs_patch_section`, `docs_delete` — contra la API de
+  `cerebro-docs` (repositorio de documentos Markdown completos, versionados).
 
-1. Completa en `.env`: `KNOWLEDGEOS_API_URL` (URL de la API ya desplegada) y
-   `KNOWLEDGEOS_API_TOKEN` (un token con scopes `read,write,admin` y sin
+Para activar `memory_*`:
+
+1. Completa en `.env`: `CEREBRO_MEMORY_URL` (URL de la API de cerebro-memory ya
+   desplegada) y `CEREBRO_TOKEN` (un token con scopes `read,write,admin` y sin
    `--contexts` -- acceso completo a todos los contextos -- creado con
-   `knowledgeos token create mcp-gateway --scopes read,write,admin`).
+   `cerebro token create mcp-gateway --scopes read,write,admin`). Los nombres
+   anteriores `KNOWLEDGEOS_API_URL`/`KNOWLEDGEOS_API_TOKEN` siguen funcionando como
+   fallback si ya los tenías configurados.
 2. Da a un token de `MCP_AUTH_TOKENS` acceso al scope `cerebro`.
 3. El cliente MCP se conecta a `https://mcp.dominio.com/cerebro` con
-   `Authorization: Bearer <su-token>` — nunca ve `KNOWLEDGEOS_API_TOKEN`.
+   `Authorization: Bearer <su-token>` — nunca ve `CEREBRO_TOKEN`.
 
-Si `KNOWLEDGEOS_API_URL` o `KNOWLEDGEOS_API_TOKEN` no están definidos, este MCP se
-omite del arranque.
+Si `CEREBRO_MEMORY_URL`/`KNOWLEDGEOS_API_URL` o `CEREBRO_TOKEN`/`KNOWLEDGEOS_API_TOKEN`
+no están definidos, todo el MCP `/cerebro` se omite del arranque.
+
+Para activar además `docs_*` (opcional, requiere `cerebro-docs` desplegado aparte):
+completa `CEREBRO_DOCS_URL` en `.env` (reusa el mismo `CEREBRO_TOKEN`). Si no está
+definida, `/cerebro` sigue funcionando solo con `memory_*`.

@@ -4,33 +4,80 @@ import type { LocalMcpEntry } from "../../registry/types.js";
 import { logger } from "../../logger.js";
 
 /**
- * Integra KnowledgeOS (https://github.com/luisjdev0/cerebro, privado) -- memoria
- * persistente self-hosted (Postgres+pgvector detrás de una API FastAPI). Ese proyecto
- * trae su propio cliente MCP (`knowledgeos-mcp`), pero es stdio-only y no debe
- * modificarse desde aquí, así que esta carpeta es una reimplementación delgada de
- * los mismos 10 tools (mismo contrato, mismos endpoints) hablando HTTP directo con
- * la API ya desplegada -- no hay lógica de negocio propia, igual que el original.
+ * Integra el ecosistema cerebro (https://github.com/luisjdev0/cerebro, privado) --
+ * memoria persistente self-hosted (`cerebro-memory`, Postgres+pgvector detrás de una
+ * API FastAPI) y, desde que ese repo pasó a ser un monorepo de 5 paquetes, también un
+ * repositorio de documentos Markdown (`cerebro-docs`, misma arquitectura, API
+ * hermana). El monorepo trae su propio cliente MCP (`cerebro-mcp`), pero es
+ * stdio-only y no debe modificarse desde aquí, así que esta carpeta es una
+ * reimplementación delgada de los mismos tools (mismo contrato, mismos endpoints)
+ * hablando HTTP directo con las APIs ya desplegadas -- no hay lógica de negocio
+ * propia, igual que el original (`cerebro-mcp/server.py` es en sí mismo un adaptador
+ * delgado sobre `cerebro_clients`).
+ *
+ * Prefijos `memory_*` / `docs_*`, igual que upstream: las `memory_*` son un port 1:1
+ * de las 10 tools originales de `cerebro-memory` (mismos nombres/schemas), y las
+ * `docs_*` son las 9 tools nuevas de `cerebro-docs`. `cerebro-docs` es un servicio
+ * separado (propia URL, propio contrato) que puede no estar desplegado todavía --
+ * si `CEREBRO_DOCS_URL` no está definido, las tools `docs_*` simplemente no se
+ * registran y el resto del MCP (memory_*) sigue funcionando igual.
  */
-const knowledgeosEnvSchema = z.object({
-  KNOWLEDGEOS_API_URL: z.string().url(),
-  KNOWLEDGEOS_API_TOKEN: z.string().min(1),
-  KNOWLEDGEOS_AGENT_NAME: z.string().min(1).default("mcp-gateway"),
-});
-
-type KnowledgeosConfig = z.infer<typeof knowledgeosEnvSchema>;
-
 const MEMORY_TYPES = ["semantic", "episodic", "procedural", "decision"] as const;
 const RELATIONS = ["relates_to", "caused_by", "part_of", "contradicts", "follows"] as const;
+const SECTION_OPERATIONS = ["replace", "append", "insert_after", "insert_before", "delete"] as const;
 
-function loadKnowledgeosConfig(): KnowledgeosConfig | null {
-  const parsed = knowledgeosEnvSchema.safeParse(process.env);
-  if (!parsed.success) {
+interface MemoryConfig {
+  baseUrl: string;
+  token: string;
+  agentName: string;
+}
+
+interface DocsConfig {
+  baseUrl: string;
+  token: string;
+  agentName: string;
+}
+
+// Precedencia igual a `cerebro_clients.config` (SS4/SS13 del ecosistema): las
+// variables CEREBRO_* son las nuevas, KNOWLEDGEOS_* es el fallback de compatibilidad
+// que ya estaba desplegado antes del monorepo -- solo aplica a memory, cerebro-docs
+// es un servicio nuevo sin variables legadas que preservar.
+function loadMemoryConfig(): MemoryConfig | null {
+  const baseUrl = process.env.CEREBRO_MEMORY_URL || process.env.KNOWLEDGEOS_API_URL;
+  const token = process.env.CEREBRO_TOKEN || process.env.KNOWLEDGEOS_API_TOKEN;
+  const agentName = process.env.CEREBRO_AGENT_NAME || process.env.KNOWLEDGEOS_AGENT_NAME || "mcp-gateway";
+
+  if (!baseUrl || !z.string().url().safeParse(baseUrl).success) {
     logger.warn(
-      'MCP "cerebro" deshabilitado: define KNOWLEDGEOS_API_URL y KNOWLEDGEOS_API_TOKEN para activarlo.',
+      'MCP "cerebro" deshabilitado: define CEREBRO_MEMORY_URL (o KNOWLEDGEOS_API_URL) y ' +
+        "CEREBRO_TOKEN (o KNOWLEDGEOS_API_TOKEN) para activarlo.",
     );
     return null;
   }
-  return parsed.data;
+  if (!token) {
+    logger.warn(
+      'MCP "cerebro" deshabilitado: define CEREBRO_TOKEN (o KNOWLEDGEOS_API_TOKEN) para activarlo.',
+    );
+    return null;
+  }
+  return { baseUrl, token, agentName };
+}
+
+function loadDocsConfig(agentName: string): DocsConfig | null {
+  const baseUrl = process.env.CEREBRO_DOCS_URL;
+  const token = process.env.CEREBRO_TOKEN;
+
+  if (!baseUrl || !z.string().url().safeParse(baseUrl).success) {
+    logger.info('Tools "docs_*" de cerebro deshabilitadas: define CEREBRO_DOCS_URL para activarlas.');
+    return null;
+  }
+  if (!token) {
+    logger.warn(
+      'Tools "docs_*" de cerebro deshabilitadas: CEREBRO_DOCS_URL está definido pero falta CEREBRO_TOKEN.',
+    );
+    return null;
+  }
+  return { baseUrl, token, agentName };
 }
 
 function textResult(value: unknown) {
@@ -38,56 +85,72 @@ function textResult(value: unknown) {
 }
 
 // fetch()'s Response.json() types as Promise<unknown> under this project's lib config;
-// every caller here already handles arbitrary JSON shapes from the KnowledgeOS API.
+// every caller here already handles arbitrary JSON shapes from the cerebro APIs.
 function readJson(res: Response): Promise<any> {
   return res.json();
 }
 
-function connectionErrorMessage(apiUrl: string, exc: unknown): string {
-  return `No se pudo conectar con la API de KnowledgeOS en ${apiUrl}: ${String(exc)}.`;
+function connectionErrorMessage(service: string, apiUrl: string, exc: unknown): string {
+  return `No se pudo conectar con la API de ${service} en ${apiUrl}: ${String(exc)}.`;
 }
 
-function authErrorMessage(apiUrl: string): string {
-  return (
-    `La API de KnowledgeOS en ${apiUrl} rechazó la autenticación (401). ` +
-    "Verifica KNOWLEDGEOS_API_TOKEN."
-  );
+function authErrorMessage(service: string, tokenVar: string): string {
+  return `La API de ${service} rechazó la autenticación (401). Verifica ${tokenVar}.`;
 }
 
-async function httpErrorMessage(res: Response): Promise<string> {
+async function httpErrorMessage(service: string, res: Response): Promise<string> {
   let detail: unknown;
   try {
     detail = (await readJson(res))?.detail ?? (await res.text());
   } catch {
     detail = res.statusText;
   }
-  return `La API de KnowledgeOS devolvió ${res.status}: ${JSON.stringify(detail)}`;
+  return `La API de ${service} devolvió ${res.status}: ${JSON.stringify(detail)}`;
 }
 
-export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
-  const server = new McpServer({ name: "cerebro", version: "1.0.0" });
+export function createCerebroServer(memory: MemoryConfig, docs: DocsConfig | null): McpServer {
+  const server = new McpServer({ name: "cerebro", version: "2.0.0" });
 
   // Estado de proceso por sesión MCP (una instancia de McpServer por sesión, ver
   // registry/types.ts): último `disambiguation_id` sin resolver, igual al
-  // "process-memory slot" del mcp_server.py original -- ver docstring de
-  // memory_search más abajo para el comportamiento de auto-resolve que habilita.
+  // "process-memory slot" del server.py original -- ver docstring de memory_search
+  // más abajo para el comportamiento de auto-resolve que habilita.
   let lastDisambiguationId: string | null = null;
 
-  async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
-    return fetch(`${config.KNOWLEDGEOS_API_URL}${path}`, {
+  async function memoryFetch(path: string, init: RequestInit = {}): Promise<Response> {
+    return fetch(`${memory.baseUrl}${path}`, {
       ...init,
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${config.KNOWLEDGEOS_API_TOKEN}`,
-        "X-Agent-Name": config.KNOWLEDGEOS_AGENT_NAME,
+        Authorization: `Bearer ${memory.token}`,
+        "X-Agent-Name": memory.agentName,
+        ...init.headers,
+      },
+    });
+  }
+
+  async function docsFetch(path: string, init: RequestInit = {}): Promise<Response> {
+    if (!docs) throw new Error('Tools "docs_*" deshabilitadas: define CEREBRO_DOCS_URL y CEREBRO_TOKEN.');
+    return fetch(`${docs.baseUrl}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${docs.token}`,
+        "X-Agent-Name": docs.agentName,
         ...init.headers,
       },
     });
   }
 
   async function getContexts(): Promise<any[]> {
-    const res = await apiFetch("/contexts");
-    if (!res.ok) throw new Error(await httpErrorMessage(res));
+    const res = await memoryFetch("/contexts");
+    if (!res.ok) throw new Error(await httpErrorMessage("cerebro-memory", res));
+    return readJson(res);
+  }
+
+  async function getCategories(): Promise<any[]> {
+    const res = await docsFetch("/categories");
+    if (!res.ok) throw new Error(await httpErrorMessage("cerebro-docs", res));
     return readJson(res);
   }
 
@@ -98,6 +161,13 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
     return contexts
       .map((c) => `- ${c.slug} (${c.kind}): ${c.description || "sin descripción"}`)
       .join("\n");
+  }
+
+  function formatCategoryList(categories: any[]): string {
+    if (categories.length === 0) {
+      return "(no hay categorías creadas todavía; usa docs_create_category para crear la primera)";
+    }
+    return categories.map((c) => `- ${c.slug}: ${c.description || c.name}`).join("\n");
   }
 
   function formatAmbiguousMessage(scopeDecision: any): string {
@@ -117,6 +187,8 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
     );
     return lines.join("\n");
   }
+
+  // =============================================================================== memory_*
 
   server.registerTool(
     "memory_search",
@@ -148,12 +220,12 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
 
       let res: Response;
       try {
-        res = await apiFetch(`/memories/search?${params}`);
+        res = await memoryFetch(`/memories/search?${params}`);
       } catch (exc) {
-        return textResult({ error: connectionErrorMessage(config.KNOWLEDGEOS_API_URL, exc) });
+        return textResult({ error: connectionErrorMessage("cerebro-memory", memory.baseUrl, exc) });
       }
-      if (res.status === 401) return textResult({ error: authErrorMessage(config.KNOWLEDGEOS_API_URL) });
-      if (!res.ok) return textResult({ error: await httpErrorMessage(res) });
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-memory", "CEREBRO_TOKEN") });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-memory", res) });
 
       const data = await readJson(res);
       const results = data.results ?? [];
@@ -167,7 +239,7 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
       let note: string | null = null;
       if (context && pendingId) {
         try {
-          const resolveRes = await apiFetch(`/disambiguations/${pendingId}/resolve`, {
+          const resolveRes = await memoryFetch(`/disambiguations/${pendingId}/resolve`, {
             method: "POST",
             body: JSON.stringify({ context }),
           });
@@ -222,11 +294,11 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
 
       let res: Response;
       try {
-        res = await apiFetch("/memories", { method: "POST", body: JSON.stringify(body) });
+        res = await memoryFetch("/memories", { method: "POST", body: JSON.stringify(body) });
       } catch (exc) {
-        return textResult({ error: connectionErrorMessage(config.KNOWLEDGEOS_API_URL, exc) });
+        return textResult({ error: connectionErrorMessage("cerebro-memory", memory.baseUrl, exc) });
       }
-      if (res.status === 401) return textResult({ error: authErrorMessage(config.KNOWLEDGEOS_API_URL) });
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-memory", "CEREBRO_TOKEN") });
       if (res.status === 422) {
         const body422 = await readJson(res).catch(() => ({}));
         const detail = body422.detail ?? "";
@@ -239,9 +311,9 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
               `Elige uno de estos, o créalo primero con memory_create_context(slug='${context}', ...).`,
           });
         }
-        return textResult({ error: `KnowledgeOS rechazó la memoria (422): ${JSON.stringify(detail)}` });
+        return textResult({ error: `cerebro-memory rechazó la memoria (422): ${JSON.stringify(detail)}` });
       }
-      if (!res.ok) return textResult({ error: await httpErrorMessage(res) });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-memory", res) });
 
       return textResult({ memory: await readJson(res) });
     },
@@ -252,7 +324,7 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
     {
       title: "Actualizar memoria",
       description:
-        "Actualiza el contenido de una memoria existente. KnowledgeOS nunca edita in-place: crea " +
+        "Actualiza el contenido de una memoria existente. cerebro-memory nunca edita in-place: crea " +
         "una versión nueva y marca la anterior como 'superseded', preservando el historial.",
       inputSchema: {
         memory_id: z.string().describe("UUID de la memoria activa a reemplazar"),
@@ -262,17 +334,17 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
     async ({ memory_id, content }) => {
       let res: Response;
       try {
-        res = await apiFetch(`/memories/${memory_id}`, { method: "PATCH", body: JSON.stringify({ content }) });
+        res = await memoryFetch(`/memories/${memory_id}`, { method: "PATCH", body: JSON.stringify({ content }) });
       } catch (exc) {
-        return textResult({ error: connectionErrorMessage(config.KNOWLEDGEOS_API_URL, exc) });
+        return textResult({ error: connectionErrorMessage("cerebro-memory", memory.baseUrl, exc) });
       }
-      if (res.status === 401) return textResult({ error: authErrorMessage(config.KNOWLEDGEOS_API_URL) });
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-memory", "CEREBRO_TOKEN") });
       if (res.status === 404) return textResult({ error: `No existe ninguna memoria con id '${memory_id}'.` });
       if (res.status === 409) {
         const detail = (await readJson(res).catch(() => ({}))).detail ?? "";
         return textResult({ error: `No se pudo actualizar: ${detail}` });
       }
-      if (!res.ok) return textResult({ error: await httpErrorMessage(res) });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-memory", res) });
 
       return textResult({ memory: await readJson(res) });
     },
@@ -293,13 +365,13 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
     async ({ memory_id, hard }) => {
       let res: Response;
       try {
-        res = await apiFetch(`/memories/${memory_id}?hard=${hard}`, { method: "DELETE" });
+        res = await memoryFetch(`/memories/${memory_id}?hard=${hard}`, { method: "DELETE" });
       } catch (exc) {
-        return textResult({ error: connectionErrorMessage(config.KNOWLEDGEOS_API_URL, exc) });
+        return textResult({ error: connectionErrorMessage("cerebro-memory", memory.baseUrl, exc) });
       }
-      if (res.status === 401) return textResult({ error: authErrorMessage(config.KNOWLEDGEOS_API_URL) });
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-memory", "CEREBRO_TOKEN") });
       if (res.status === 404) return textResult({ error: `No existe ninguna memoria con id '${memory_id}'.` });
-      if (!res.ok) return textResult({ error: await httpErrorMessage(res) });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-memory", res) });
 
       return textResult(await readJson(res));
     },
@@ -325,17 +397,17 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
     async ({ from_memory_id, to_memory_id, relation, note }) => {
       let res: Response;
       try {
-        res = await apiFetch(`/memories/${from_memory_id}/edges`, {
+        res = await memoryFetch(`/memories/${from_memory_id}/edges`, {
           method: "POST",
           body: JSON.stringify({ to_memory: to_memory_id, relation, note: note ?? null }),
         });
       } catch (exc) {
-        return textResult({ error: connectionErrorMessage(config.KNOWLEDGEOS_API_URL, exc) });
+        return textResult({ error: connectionErrorMessage("cerebro-memory", memory.baseUrl, exc) });
       }
-      if (res.status === 401) return textResult({ error: authErrorMessage(config.KNOWLEDGEOS_API_URL) });
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-memory", "CEREBRO_TOKEN") });
       if (res.status === 404) {
         const detail = (await readJson(res).catch(() => ({}))).detail;
-        return textResult({ error: `KnowledgeOS no encontró alguna de las dos memorias: ${detail}` });
+        return textResult({ error: `cerebro-memory no encontró alguna de las dos memorias: ${detail}` });
       }
       if (res.status === 409) {
         const detail = (await readJson(res).catch(() => ({}))).detail;
@@ -345,7 +417,7 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
         const detail = (await readJson(res).catch(() => ({}))).detail;
         return textResult({ error: `Datos inválidos: ${detail}` });
       }
-      if (!res.ok) return textResult({ error: await httpErrorMessage(res) });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-memory", res) });
 
       return textResult({ edge: await readJson(res) });
     },
@@ -373,17 +445,17 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
 
       let res: Response;
       try {
-        res = await apiFetch(`/memories/${memory_id}/related?${params}`);
+        res = await memoryFetch(`/memories/${memory_id}/related?${params}`);
       } catch (exc) {
-        return textResult({ error: connectionErrorMessage(config.KNOWLEDGEOS_API_URL, exc) });
+        return textResult({ error: connectionErrorMessage("cerebro-memory", memory.baseUrl, exc) });
       }
-      if (res.status === 401) return textResult({ error: authErrorMessage(config.KNOWLEDGEOS_API_URL) });
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-memory", "CEREBRO_TOKEN") });
       if (res.status === 404) return textResult({ error: `No existe ninguna memoria con id '${memory_id}'.` });
       if (res.status === 422) {
         const detail = (await readJson(res).catch(() => ({}))).detail;
         return textResult({ error: `relation inválida: ${detail}` });
       }
-      if (!res.ok) return textResult({ error: await httpErrorMessage(res) });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-memory", res) });
 
       const data = await readJson(res);
       return textResult({ related: data.related ?? [] });
@@ -412,16 +484,16 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
 
       let res: Response;
       try {
-        res = await apiFetch(`/timeline?${params}`);
+        res = await memoryFetch(`/timeline?${params}`);
       } catch (exc) {
-        return textResult({ error: connectionErrorMessage(config.KNOWLEDGEOS_API_URL, exc) });
+        return textResult({ error: connectionErrorMessage("cerebro-memory", memory.baseUrl, exc) });
       }
-      if (res.status === 401) return textResult({ error: authErrorMessage(config.KNOWLEDGEOS_API_URL) });
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-memory", "CEREBRO_TOKEN") });
       if (res.status === 422) {
         const detail = (await readJson(res).catch(() => ({}))).detail;
-        return textResult({ error: `KnowledgeOS rechazó la consulta: ${detail}` });
+        return textResult({ error: `cerebro-memory rechazó la consulta: ${detail}` });
       }
-      if (!res.ok) return textResult({ error: await httpErrorMessage(res) });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-memory", res) });
 
       const data = await readJson(res);
       return textResult({ items: data.items ?? [] });
@@ -440,12 +512,12 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
     async () => {
       let res: Response;
       try {
-        res = await apiFetch("/contexts");
+        res = await memoryFetch("/contexts");
       } catch (exc) {
-        return textResult({ error: connectionErrorMessage(config.KNOWLEDGEOS_API_URL, exc) });
+        return textResult({ error: connectionErrorMessage("cerebro-memory", memory.baseUrl, exc) });
       }
-      if (res.status === 401) return textResult({ error: authErrorMessage(config.KNOWLEDGEOS_API_URL) });
-      if (!res.ok) return textResult({ error: await httpErrorMessage(res) });
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-memory", "CEREBRO_TOKEN") });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-memory", res) });
 
       return textResult({ contexts: await readJson(res) });
     },
@@ -471,13 +543,13 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
 
       let res: Response;
       try {
-        res = await apiFetch("/contexts", { method: "POST", body: JSON.stringify(body) });
+        res = await memoryFetch("/contexts", { method: "POST", body: JSON.stringify(body) });
       } catch (exc) {
-        return textResult({ error: connectionErrorMessage(config.KNOWLEDGEOS_API_URL, exc) });
+        return textResult({ error: connectionErrorMessage("cerebro-memory", memory.baseUrl, exc) });
       }
-      if (res.status === 401) return textResult({ error: authErrorMessage(config.KNOWLEDGEOS_API_URL) });
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-memory", "CEREBRO_TOKEN") });
       if (res.status === 409) return textResult({ error: `Ya existe un contexto con slug '${slug}'.` });
-      if (!res.ok) return textResult({ error: await httpErrorMessage(res) });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-memory", res) });
 
       return textResult({ context: await readJson(res) });
     },
@@ -495,14 +567,342 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
     async () => {
       let res: Response;
       try {
-        res = await apiFetch("/stats");
+        res = await memoryFetch("/stats");
       } catch (exc) {
-        return textResult({ error: connectionErrorMessage(config.KNOWLEDGEOS_API_URL, exc) });
+        return textResult({ error: connectionErrorMessage("cerebro-memory", memory.baseUrl, exc) });
       }
-      if (res.status === 401) return textResult({ error: authErrorMessage(config.KNOWLEDGEOS_API_URL) });
-      if (!res.ok) return textResult({ error: await httpErrorMessage(res) });
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-memory", "CEREBRO_TOKEN") });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-memory", res) });
 
       return textResult({ stats: await readJson(res) });
+    },
+  );
+
+  // =============================================================================== docs_*
+  // Solo se registran si CEREBRO_DOCS_URL/CEREBRO_TOKEN están configurados -- ver
+  // loadDocsConfig(). Mismo contrato que packages/cerebro-mcp/src/cerebro_mcp/server.py.
+
+  if (!docs) return server;
+
+  server.registerTool(
+    "docs_create_category",
+    {
+      title: "Crear categoría de documentos",
+      description:
+        "Crea una categoría nueva para organizar documentos Markdown completos. Igual flujo que " +
+        "memory_create_context: cerebro-docs organiza documentos en categorías (tabla formal, no " +
+        "texto libre) para poder redistribuirlas después sin tocar los documentos que contienen. " +
+        "Necesaria antes de docs_save si ninguna categoría existente encaja.",
+      inputSchema: {
+        slug: z.string().describe("Identificador corto y estable en minúsculas con guiones, único"),
+        name: z.string().describe("Nombre legible para humanos"),
+        description: z.string().optional().describe("Descripción breve de qué documentos van en esta categoría"),
+      },
+    },
+    async ({ slug, name, description }) => {
+      const body: Record<string, unknown> = { slug, name };
+      if (description !== undefined) body.description = description;
+
+      let res: Response;
+      try {
+        res = await docsFetch("/categories", { method: "POST", body: JSON.stringify(body) });
+      } catch (exc) {
+        return textResult({ error: connectionErrorMessage("cerebro-docs", docs.baseUrl, exc) });
+      }
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-docs", "CEREBRO_TOKEN") });
+      if (res.status === 409) return textResult({ error: `Ya existe una categoría con slug '${slug}'.` });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-docs", res) });
+
+      return textResult({ category: await readJson(res) });
+    },
+  );
+
+  server.registerTool(
+    "docs_categories",
+    {
+      title: "Listar categorías de documentos",
+      description:
+        "Lista todas las categorías de documentos existentes, con su descripción. Llámala antes " +
+        "de docs_save si no sabes en qué categoría debe ir un documento nuevo.",
+      inputSchema: {},
+    },
+    async () => {
+      let res: Response;
+      try {
+        res = await docsFetch("/categories");
+      } catch (exc) {
+        return textResult({ error: connectionErrorMessage("cerebro-docs", docs.baseUrl, exc) });
+      }
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-docs", "CEREBRO_TOKEN") });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-docs", res) });
+
+      return textResult({ categories: await readJson(res) });
+    },
+  );
+
+  server.registerTool(
+    "docs_save",
+    {
+      title: "Guardar documento",
+      description:
+        "Guarda un documento Markdown COMPLETO nuevo (sin destilar ni truncar). A diferencia de " +
+        "memory_remember (que guarda hechos/decisiones destilados de 1-3 frases), docs_save guarda " +
+        "el documento íntegro tal cual. `category` es OBLIGATORIA y debe existir -- revisa con " +
+        "docs_categories() y créala con docs_create_category si no existe ninguna adecuada. Si el " +
+        "slug ya existe en esa categoría, falla con un error explícito (nunca auto-sufija ni " +
+        "sobrescribe en silencio) -- usa docs_update para editar el existente.",
+      inputSchema: {
+        title: z.string().describe("Título del documento"),
+        content: z.string().describe("El Markdown completo, sin truncar"),
+        category: z.string().describe("Slug de una categoría existente (obligatorio)"),
+        slug: z.string().optional().describe("Identificador corto opcional; si se omite, se autogenera del título"),
+      },
+    },
+    async ({ title, content, category, slug }) => {
+      const body: Record<string, unknown> = { title, content, category };
+      if (slug !== undefined) body.slug = slug;
+
+      let res: Response;
+      try {
+        res = await docsFetch("/documents", { method: "POST", body: JSON.stringify(body) });
+      } catch (exc) {
+        return textResult({ error: connectionErrorMessage("cerebro-docs", docs.baseUrl, exc) });
+      }
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-docs", "CEREBRO_TOKEN") });
+      if (res.status === 404) {
+        const categories = await getCategories().catch(() => []);
+        return textResult({
+          error:
+            `La categoría '${category}' no existe. Categorías disponibles:\n` +
+            `${formatCategoryList(categories)}\n\n` +
+            `Elige una de estas, o créala primero con docs_create_category(slug='${category}', ...).`,
+        });
+      }
+      if (res.status === 409) {
+        const detail = (await readJson(res).catch(() => ({}))).detail;
+        return textResult({ error: String(detail) });
+      }
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-docs", res) });
+
+      return textResult({ document: await readJson(res) });
+    },
+  );
+
+  server.registerTool(
+    "docs_get",
+    {
+      title: "Leer documento",
+      description:
+        "Lee un documento completo por su ruta exacta `/{category}/{slug}`. Úsala cuando ya sabes " +
+        "exactamente qué documento quieres. Si solo tienes una referencia imprecisa, usa docs_search.",
+      inputSchema: {
+        category: z.string().describe("Slug de la categoría del documento"),
+        slug: z.string().describe("Slug del documento dentro de esa categoría"),
+      },
+    },
+    async ({ category, slug }) => {
+      let res: Response;
+      try {
+        res = await docsFetch(`/documents/${encodeURIComponent(category)}/${encodeURIComponent(slug)}`);
+      } catch (exc) {
+        return textResult({ error: connectionErrorMessage("cerebro-docs", docs.baseUrl, exc) });
+      }
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-docs", "CEREBRO_TOKEN") });
+      if (res.status === 404) return textResult({ error: `No existe ningún documento en '${category}/${slug}'.` });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-docs", res) });
+
+      return textResult({ document: await readJson(res) });
+    },
+  );
+
+  server.registerTool(
+    "docs_search",
+    {
+      title: "Buscar documentos",
+      description:
+        "Busca documentos por texto (full-text simple, sin embeddings) -- para referencias " +
+        "imprecisas ('la guía de despliegue'). Busca en título Y contenido. Si ya sabes la categoría " +
+        "y el slug exactos, usa docs_get en vez de esta.",
+      inputSchema: {
+        query: z.string().describe("Texto a buscar (full-text sobre título + contenido)"),
+        category: z.string().optional().describe("Slug de una categoría para acotar la búsqueda"),
+        limit: z.number().int().positive().max(100).default(20).describe("Máximo de resultados por página"),
+        offset: z.number().int().nonnegative().default(0).describe("Cuántos resultados saltar, para paginar"),
+      },
+    },
+    async ({ query, category, limit, offset }) => {
+      const params = new URLSearchParams({ q: query, limit: String(limit), offset: String(offset) });
+      if (category) params.set("category", category);
+
+      let res: Response;
+      try {
+        res = await docsFetch(`/documents?${params}`);
+      } catch (exc) {
+        return textResult({ error: connectionErrorMessage("cerebro-docs", docs.baseUrl, exc) });
+      }
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-docs", "CEREBRO_TOKEN") });
+      if (res.status === 403) return textResult({ error: `No tienes acceso a la categoría '${category}'.` });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-docs", res) });
+
+      return textResult({ documents: await readJson(res) });
+    },
+  );
+
+  server.registerTool(
+    "docs_list",
+    {
+      title: "Listar documentos",
+      description:
+        "Lista documentos, más recientes primero (sin filtro de texto -- ver docs_search para eso). " +
+        "Útil para explorar qué documentos existen en una categoría, o en todo el repositorio si se " +
+        "omite `category`.",
+      inputSchema: {
+        category: z.string().optional().describe("Slug de una categoría para acotar el listado"),
+        limit: z.number().int().positive().max(100).default(20).describe("Máximo de resultados por página"),
+        offset: z.number().int().nonnegative().default(0).describe("Cuántos resultados saltar, para paginar"),
+      },
+    },
+    async ({ category, limit, offset }) => {
+      const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+      if (category) params.set("category", category);
+
+      let res: Response;
+      try {
+        res = await docsFetch(`/documents?${params}`);
+      } catch (exc) {
+        return textResult({ error: connectionErrorMessage("cerebro-docs", docs.baseUrl, exc) });
+      }
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-docs", "CEREBRO_TOKEN") });
+      if (res.status === 403) return textResult({ error: `No tienes acceso a la categoría '${category}'.` });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-docs", res) });
+
+      return textResult({ documents: await readJson(res) });
+    },
+  );
+
+  server.registerTool(
+    "docs_update",
+    {
+      title: "Reemplazar documento",
+      description:
+        "Reemplazo COMPLETO de un documento existente (incluye poder moverlo de categoría). " +
+        "cerebro-docs archiva un snapshot del contenido anterior en el historial de versiones antes " +
+        "de aplicar el reemplazo. Para editar solo una parte del documento, usa docs_patch_section.",
+      inputSchema: {
+        document_id: z.string().describe("UUID del documento a reemplazar"),
+        title: z.string().describe("Título nuevo (reemplaza el anterior)"),
+        content: z.string().describe("Contenido Markdown nuevo COMPLETO (reemplaza el anterior entero)"),
+        category: z.string().describe("Slug de la categoría destino -- puede ser distinta de la actual para mover el documento (debe existir)"),
+        slug: z.string().optional().describe("Slug nuevo opcional; si se omite, conserva el slug actual"),
+      },
+    },
+    async ({ document_id, title, content, category, slug }) => {
+      const body: Record<string, unknown> = { title, content, category };
+      if (slug !== undefined) body.slug = slug;
+
+      let res: Response;
+      try {
+        res = await docsFetch(`/documents/${document_id}`, { method: "PATCH", body: JSON.stringify(body) });
+      } catch (exc) {
+        return textResult({ error: connectionErrorMessage("cerebro-docs", docs.baseUrl, exc) });
+      }
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-docs", "CEREBRO_TOKEN") });
+      if (res.status === 404) {
+        const detail = (await readJson(res).catch(() => ({}))).detail;
+        return textResult({ error: String(detail) });
+      }
+      if (res.status === 409) {
+        const detail = (await readJson(res).catch(() => ({}))).detail;
+        return textResult({ error: String(detail) });
+      }
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-docs", res) });
+
+      return textResult({ document: await readJson(res) });
+    },
+  );
+
+  server.registerTool(
+    "docs_patch_section",
+    {
+      title: "Parchear sección de documento",
+      description:
+        "Parche PARCIAL de un documento por sección (desde un heading hasta el siguiente del mismo " +
+        "nivel o superior). Vocabulario de `operation`: 'replace' (sustituye el cuerpo de la sección " +
+        "por `body`), 'append' (agrega `body` al final del cuerpo), 'insert_after'/'insert_before' " +
+        "(inserta `body` como bloque hermano antes/después de la sección completa), 'delete' (elimina " +
+        "la sección completa, `body` se ignora). El `heading` debe matchear EXACTO el texto de un " +
+        "heading del documento (sin los `#`); si aparece más de una vez, esta tool SIEMPRE falla " +
+        "(nunca adivina). Si no aparece ninguna vez, falla salvo que pases `create_if_missing=true`.",
+      inputSchema: {
+        document_id: z.string().describe("UUID del documento a parchear"),
+        heading: z.string().describe("Texto exacto del heading objetivo (sin los #)"),
+        operation: z.enum(SECTION_OPERATIONS).describe("Una de: replace, append, insert_after, insert_before, delete"),
+        body: z.string().default("").describe("Contenido Markdown a insertar/usar según `operation` (ignorado en delete)"),
+        create_if_missing: z.boolean().default(false).describe("Si true y el heading no existe, lo crea al final del documento en vez de fallar"),
+        new_heading_level: z.number().int().min(1).max(6).default(2).describe("Nivel del heading nuevo (1-6) si create_if_missing lo crea"),
+      },
+    },
+    async ({ document_id, heading, operation, body, create_if_missing, new_heading_level }) => {
+      const payload = {
+        heading,
+        operation,
+        body,
+        create_if_missing,
+        new_heading_level,
+      };
+
+      let res: Response;
+      try {
+        res = await docsFetch(`/documents/${document_id}/section`, {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        });
+      } catch (exc) {
+        return textResult({ error: connectionErrorMessage("cerebro-docs", docs.baseUrl, exc) });
+      }
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-docs", "CEREBRO_TOKEN") });
+      if (res.status === 404) {
+        const detail = (await readJson(res).catch(() => ({}))).detail;
+        return textResult({ error: String(detail) });
+      }
+      if (res.status === 409) {
+        const detail = (await readJson(res).catch(() => ({}))).detail;
+        return textResult({ error: String(detail) });
+      }
+      if (res.status === 422) {
+        const detail = (await readJson(res).catch(() => ({}))).detail;
+        return textResult({ error: String(detail) });
+      }
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-docs", res) });
+
+      return textResult({ document: await readJson(res) });
+    },
+  );
+
+  server.registerTool(
+    "docs_delete",
+    {
+      title: "Borrar documento",
+      description:
+        "Borra un documento (y, en cascada, todo su historial de versiones). No hay " +
+        "papelera/soft-delete -- es irreversible, a diferencia de memory_forget (que por defecto " +
+        "solo archiva). Confirma con el usuario antes de llamar esta tool si hay dudas.",
+      inputSchema: {
+        document_id: z.string().describe("UUID del documento a borrar"),
+      },
+    },
+    async ({ document_id }) => {
+      let res: Response;
+      try {
+        res = await docsFetch(`/documents/${document_id}`, { method: "DELETE" });
+      } catch (exc) {
+        return textResult({ error: connectionErrorMessage("cerebro-docs", docs.baseUrl, exc) });
+      }
+      if (res.status === 401) return textResult({ error: authErrorMessage("cerebro-docs", "CEREBRO_TOKEN") });
+      if (res.status === 404) return textResult({ error: `No existe ningún documento con id '${document_id}'.` });
+      if (!res.ok) return textResult({ error: await httpErrorMessage("cerebro-docs", res) });
+
+      return textResult(await readJson(res));
     },
   );
 
@@ -510,14 +910,16 @@ export function createKnowledgeosServer(config: KnowledgeosConfig): McpServer {
 }
 
 function loadCerebroEntry(): LocalMcpEntry | null {
-  const config = loadKnowledgeosConfig();
-  if (!config) return null;
+  const memory = loadMemoryConfig();
+  if (!memory) return null;
+
+  const docs = loadDocsConfig(memory.agentName);
 
   return {
     kind: "local",
     name: "cerebro",
     path: "/cerebro",
-    createServer: () => createKnowledgeosServer(config),
+    createServer: () => createCerebroServer(memory, docs),
   };
 }
 
