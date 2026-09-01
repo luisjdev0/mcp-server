@@ -231,3 +231,35 @@ no están definidos, todo el MCP `/cerebro` se omite del arranque.
 Para activar además `docs_*` (opcional, requiere `cerebro-docs` desplegado aparte):
 completa `CEREBRO_DOCS_URL` en `.env` (reusa el mismo `CEREBRO_TOKEN`). Si no está
 definida, `/cerebro` sigue funcionando solo con `memory_*`.
+
+### `/freelancer` (local, port de [godesigntech/freelancer-mcp-server](https://github.com/godesigntech/freelancer-mcp-server), MIT)
+
+Igual que `/cerebro`, este MCP **no es un proxy a un sidecar**: es un port 1:1 (mismos
+nombres de tools, mismos endpoints) del servidor de terceros de arriba, reimplementado
+para hablar HTTP directo contra la API pública de `freelancer.com` en vez de correr su
+paquete npm (stdio-only) en un contenedor aparte. Se auditó el código original línea por
+línea antes de portarlo: solo toca `freelancer.com/api`, sin telemetría ni dependencias
+de terceros. Expone 18 tools (`freelancer_*`): buscar y pujar proyectos, leer/enviar
+mensajes, ver hitos, y gestionar skills/perfiles de especialidad — incluye acciones con
+consecuencia real (`freelancer_place_bid`, `freelancer_send_message`, edición de
+skills/perfiles), marcadas con `destructiveHint`/`readOnlyHint` en sus `annotations` para
+que el cliente MCP las muestre claramente antes de ejecutarlas.
+
+Soporta múltiples cuentas de Freelancer en un mismo servidor (la tuya + cuentas de
+clientes que gestiones), seleccionables por tool call con el argumento `account`.
+
+Para activarlo:
+
+1. Genera un token en [freelancer.com/settings/develop](https://www.freelancer.com/settings/develop)
+   (Application Dashboard → Generate Token) — no requiere OAuth ni revisión de app.
+2. Completa en `.env`: `FREELANCER_OAUTH_TOKEN` (una cuenta) o `FREELANCER_ACCOUNTS`
+   (JSON `{"etiqueta":"token", ...}`, varias cuentas — la primera etiqueta es la cuenta
+   por defecto).
+3. Da a un token de `MCP_AUTH_TOKENS` acceso al scope `freelancer`.
+4. El cliente MCP se conecta a `https://mcp.dominio.com/freelancer` con
+   `Authorization: Bearer <su-token>` — el/los token(s) de Freelancer nunca salen del
+   contenedor, viajan solo en el header propio de Freelancer (`freelancer-oauth-v1`)
+   hacia `freelancer.com`.
+
+Si ni `FREELANCER_OAUTH_TOKEN` ni `FREELANCER_ACCOUNTS` están definidos, este MCP se
+omite del arranque.
