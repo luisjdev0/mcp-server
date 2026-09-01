@@ -188,19 +188,26 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
     }
   }
 
+  /**
+   * A diferencia de buildForm, esto NO puede usar URLSearchParams: percent-encodea
+   * `[`/`]` a `%5B%5D`, y el backend de freelancer.com solo reconoce el filtro
+   * `key[]=valor` con los corchetes literales en el query string (no en el body de un
+   * form, ahí sí acepta el encoding de URLSearchParams -- ver buildForm). Confirmado
+   * comparando contra cómo serializa `axios` (usado por el paquete original) sus
+   * `params` de GET: deja los corchetes sin encodear.
+   */
   function buildQuery(params?: Record<string, unknown>): string {
     if (!params) return "";
-    const usp = new URLSearchParams();
+    const pairs: string[] = [];
     for (const [key, value] of Object.entries(params)) {
       if (value === undefined || value === null) continue;
       if (Array.isArray(value)) {
-        for (const v of value) usp.append(`${key}[]`, String(v));
+        for (const v of value) pairs.push(`${encodeURIComponent(key)}[]=${encodeURIComponent(String(v))}`);
       } else {
-        usp.append(key, String(value));
+        pairs.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
       }
     }
-    const qs = usp.toString();
-    return qs ? `?${qs}` : "";
+    return pairs.length ? `?${pairs.join("&")}` : "";
   }
 
   function buildForm(arrayParams: Record<string, Array<string | number>>, scalarParams: Record<string, unknown> = {}): string {
@@ -775,8 +782,10 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
     {
       title: "Place a Bid",
       description:
-        "Submit a bid / proposal on a Freelancer.com project. ⚠️ This creates a real bid on your " +
-        "account. Review before confirming — including which account, when multiple are configured.",
+        "Submit a bid / proposal on a Freelancer.com project. Automatically resolves and includes " +
+        "your bidder_id from the account's own profile (required by the API, undocumented by the " +
+        "upstream package this was ported from). ⚠️ This creates a real bid on your account. Review " +
+        "before confirming — including which account, when multiple are configured.",
       inputSchema: {
         project_id: z.number().int().positive().describe("Project ID to bid on"),
         amount: z.number().positive().describe("Bid amount in project currency"),
@@ -795,9 +804,10 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
     },
     async ({ project_id, amount, period, description, milestone_percentage, account }) => {
       try {
+        const self = await apiGet<{ id: number }>("/users/0.1/self", undefined, account);
         const result = await apiPostJson<FreelancerBid>(
           "/projects/0.1/bids",
-          { project_id, amount, period, description, milestone_percentage },
+          { project_id, bidder_id: self.id, amount, period, description, milestone_percentage },
           account,
         );
         return {
