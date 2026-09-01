@@ -45,6 +45,10 @@ interface FreelancerUser {
   hourly_rate?: number;
   earnings?: { earnings?: number };
   tagline?: string;
+  // hourly_rate y earnings.earnings vienen denominados en la moneda de cuenta
+  // del usuario (confirmado en vivo), no necesariamente USD -- mismo patrón
+  // que currency en FreelancerProject.
+  primary_currency?: { code?: string };
 }
 
 interface FreelancerProject {
@@ -54,7 +58,12 @@ interface FreelancerProject {
   description?: string;
   status: string;
   type: string;
-  budget?: { minimum?: number; maximum?: number; currency_code?: string };
+  // La moneda real vive en el nivel raíz del proyecto, NO dentro de `budget`
+  // (que solo trae minimum/maximum/currency_id numérico) -- confirmado en vivo
+  // contra la API real; el paquete original asumía budget.currency_code, que
+  // no existe.
+  currency?: { code?: string; sign?: string };
+  budget?: { minimum?: number; maximum?: number };
   bid_stats?: { bid_count?: number; bid_avg?: number };
   time_submitted?: number;
   time_updated?: number;
@@ -68,7 +77,9 @@ interface FreelancerBid {
   amount: number;
   period: number;
   description: string;
-  status: string;
+  // El campo real es `frontend_bid_status` -- la API no devuelve `status` en
+  // bids (confirmado en vivo); el paquete original asumía `status`.
+  frontend_bid_status?: string;
   time_submitted?: number;
   reputation?: { overall?: number };
   bidder?: FreelancerUser;
@@ -387,15 +398,24 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
 
   // =============================================================================== formatters
 
+  // Nunca antepongas "$": budget/amount vienen en la moneda del proyecto
+  // (currency_code), que NO siempre es USD -- freelancer.com es un
+  // marketplace global. El paquete original mostraba "$500-$1000 INR" (signo
+  // de dólar pegado a cifras que en realidad son rupias), un bug real que
+  // puede llevar a pujar mal si alguien confunde la cifra con USD.
+  function formatMoneyRange(min?: number, max?: number, currency?: string): string {
+    return `${min ?? "?"}–${max ?? "?"} ${currency ?? "(moneda desconocida, ver freelancer_get_project)"}`;
+  }
+
   function formatProjectSummary(p: FreelancerProject, index: number): string {
     const budget = p.budget
-      ? `$${p.budget.minimum ?? "?"}–$${p.budget.maximum ?? "?"} ${p.budget.currency_code ?? "USD"}`
+      ? formatMoneyRange(p.budget.minimum, p.budget.maximum, p.currency?.code)
       : "Budget TBD";
     const skills = p.jobs?.map((j) => j.name).join(", ") || "";
     return [
       `**${index}. [${p.id}] ${p.title}**`,
       `   Status: ${p.status} | Type: ${p.type} | Budget: ${budget}`,
-      `   Bids: ${p.bid_stats?.bid_count ?? 0} (avg $${p.bid_stats?.bid_avg?.toFixed(0) ?? "?"})`,
+      `   Bids: ${p.bid_stats?.bid_count ?? 0} (avg ${p.bid_stats?.bid_avg?.toFixed(0) ?? "?"} ${p.currency?.code ?? ""})`,
       skills ? `   Skills: ${skills}` : "",
       `   Posted: ${formatDate(p.time_submitted)}`,
       "",
@@ -406,7 +426,7 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
 
   function formatProjectFull(p: FreelancerProject): string {
     const budget = p.budget
-      ? `$${p.budget.minimum ?? "?"}–$${p.budget.maximum ?? "?"} ${p.budget.currency_code ?? "USD"}`
+      ? formatMoneyRange(p.budget.minimum, p.budget.maximum, p.currency?.code)
       : "Budget TBD";
     const skills = p.jobs?.map((j) => j.name).join(", ") || "none";
     return [
@@ -414,7 +434,7 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
       "",
       `**Status:** ${p.status} | **Type:** ${p.type} | **Budget:** ${budget}`,
       `**Posted:** ${formatDate(p.time_submitted)} | **Updated:** ${formatDate(p.time_updated)}`,
-      `**Bids:** ${p.bid_stats?.bid_count ?? 0} (avg $${p.bid_stats?.bid_avg?.toFixed(0) ?? "?"})`,
+      `**Bids:** ${p.bid_stats?.bid_count ?? 0} (avg ${p.bid_stats?.bid_avg?.toFixed(0) ?? "?"} ${p.currency?.code ?? ""})`,
       `**Skills:** ${skills}`,
       "",
       "### Description",
@@ -425,8 +445,8 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
   function formatBid(b: FreelancerBid, index: number): string {
     const bidder = b.bidder;
     return [
-      `**${index}. Bid #${b.id}** — $${b.amount} / ${b.period} days`,
-      `   Status: ${b.status} | Submitted: ${formatDate(b.time_submitted)}`,
+      `**${index}. Bid #${b.id}** — ${b.amount} (project's own currency, see freelancer_get_project) / ${b.period} days`,
+      `   Status: ${b.frontend_bid_status ?? "unknown"} | Submitted: ${formatDate(b.time_submitted)}`,
       bidder ? `   Bidder: @${bidder.username} (${bidder.display_name}) ⭐ ${b.reputation?.overall?.toFixed(2) ?? "N/A"}` : "",
       b.description ? `   Proposal: ${b.description.slice(0, 200)}${b.description.length > 200 ? "..." : ""}` : "",
       "",
@@ -476,8 +496,10 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
       "",
       `📍 ${loc?.city || ""}${loc?.city && loc?.country?.name ? ", " : ""}${loc?.country?.name || "Unknown"}`,
       `⭐ Reputation: ${rep?.overall?.toFixed(2) ?? "N/A"} (${rep?.reviews ?? 0} reviews)`,
-      user.hourly_rate ? `💰 Hourly rate: $${user.hourly_rate}/hr` : "",
-      user.earnings?.earnings ? `💵 Total earnings: $${user.earnings.earnings.toLocaleString()}` : "",
+      user.hourly_rate ? `💰 Hourly rate: ${user.hourly_rate}/hr ${user.primary_currency?.code ?? "(currency unknown)"}` : "",
+      user.earnings?.earnings
+        ? `💵 Total earnings: ${user.earnings.earnings.toLocaleString()} ${user.primary_currency?.code ?? "(currency unknown)"}`
+        : "",
       `🗓️ Registered: ${formatDate(user.registration_date)}`,
       `🛠️ Skills: ${skills}`,
     ]
@@ -640,7 +662,7 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
       try {
         const result = await apiGet<{ projects: Record<string, FreelancerProject> }>(
           "/projects/0.1/projects",
-          { ids: [project_id], full_description: true, job_details: true, upgrade_details: true },
+          { projects: [project_id], full_description: true, job_details: true, upgrade_details: true },
           account,
         );
         const project = Object.values(result.projects)[0];
@@ -660,7 +682,10 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
     {
       title: "List My Projects",
       description:
-        "List projects you own or are working on as a freelancer. To analyze past performance " +
+        "List projects you own or are working on as a freelancer. role=\"freelancer\" (projects " +
+        "you're hired on) is derived from your awarded bids, since freelancer.com's API has no " +
+        "direct \"projects I'm hired on\" filter — the `status` filter for that role is applied " +
+        "client-side after fetching, so results may be a partial page. To analyze past performance " +
         '("what are my winning strategies?"), call this with status "complete" and pair it with ' +
         'freelancer_my_bids (status "awarded") — reason over the combined results yourself.',
       inputSchema: {
@@ -675,22 +700,41 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
     async ({ role, status, limit, offset, account }) => {
       try {
         const self = await apiGet<{ id: number }>("/users/0.1/self", undefined, account);
-        const params: Record<string, unknown> = { limit, offset, full_description: false, job_details: true };
-        if (role === "owner") params.owners = [self.id];
-        else params.freelancers = [self.id];
-        if (status) params.statuses = [status];
+        let projects: FreelancerProject[];
+        let total: number | null;
 
-        const result = await apiGet<{ projects: FreelancerProject[]; total_count: number }>("/projects/0.1/projects", params, account);
-        if (!result.projects?.length) return { content: [{ type: "text", text: "No projects found." }] };
+        if (role === "owner") {
+          const params: Record<string, unknown> = { limit, offset, full_description: false, job_details: true, owners: [self.id] };
+          if (status) params.statuses = [status];
+          const result = await apiGet<{ projects: FreelancerProject[]; total_count: number }>("/projects/0.1/projects", params, account);
+          projects = result.projects ?? [];
+          total = result.total_count;
+        } else {
+          // No hay filtro directo "proyectos donde soy freelancer" en la API de
+          // freelancer.com (confirmado en vivo: bidders[]/freelancers[] devuelven
+          // "requires id based filter" para este endpoint) -- se deriva de las pujas
+          // adjudicadas, que sí traen el proyecto embebido con project_details=true.
+          const result = await apiGet<{ bids: FreelancerBid[]; projects?: Record<string, FreelancerProject> }>(
+            "/projects/0.1/bids",
+            { bidders: [self.id], statuses: ["awarded"], project_details: true, limit, offset },
+            account,
+          );
+          const byId = result.projects ?? {};
+          projects = (result.bids ?? []).map((b) => byId[String(b.project_id)]).filter((p): p is FreelancerProject => Boolean(p));
+          if (status) projects = projects.filter((p) => p.status === status);
+          total = null;
+        }
+
+        if (!projects.length) return { content: [{ type: "text", text: "No projects found." }] };
 
         const lines = [
-          `**Your projects as ${role}** — ${result.total_count} total (showing ${result.projects.length}):`,
+          `**Your projects as ${role}** — ${total !== null ? `${total} total (showing ${projects.length})` : `${projects.length} shown (from this page of awarded bids; may be partial)`}:`,
           "",
-          ...result.projects.map((p, i) => formatProjectSummary(p, i + 1)),
+          ...projects.map((p, i) => formatProjectSummary(p, i + 1)),
         ];
         return {
           content: [{ type: "text", text: truncate(lines.join("\n"), CHARACTER_LIMIT) }],
-          structuredContent: { total: result.total_count, projects: result.projects },
+          structuredContent: { total, projects },
         };
       } catch (err) {
         return mcpError((err as Error).message);
@@ -715,21 +759,24 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
     },
     async ({ project_id, limit, offset, account }) => {
       try {
-        const result = await apiGet<{ bids: FreelancerBid[]; total_count: number }>(
+        // La API de bids no devuelve total_count (confirmado en vivo, a diferencia
+        // de /projects/0.1/projects) -- solo se puede reportar cuántos vinieron en
+        // esta página, no un total real.
+        const result = await apiGet<{ bids: FreelancerBid[] }>(
           "/projects/0.1/bids",
-          { project_ids: [project_id], limit, offset, reputation_details: true, bidder_details: true },
+          { projects: [project_id], limit, offset, reputation_details: true, bidder_details: true },
           account,
         );
         if (!result.bids?.length) return { content: [{ type: "text", text: `No bids found for project ${project_id}.` }] };
 
         const lines = [
-          `**Bids on project ${project_id}** — ${result.total_count} total (showing ${result.bids.length}):`,
+          `**Bids on project ${project_id}** — ${result.bids.length} shown (this page):`,
           "",
           ...result.bids.map((b, i) => formatBid(b, i + 1)),
         ];
         return {
           content: [{ type: "text", text: truncate(lines.join("\n"), CHARACTER_LIMIT) }],
-          structuredContent: { total: result.total_count, bids: result.bids },
+          structuredContent: { bids: result.bids },
         };
       } catch (err) {
         return mcpError((err as Error).message);
@@ -756,20 +803,20 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
     async ({ status, limit, offset, account }) => {
       try {
         const self = await apiGet<{ id: number }>("/users/0.1/self", undefined, account);
-        const params: Record<string, unknown> = { bidder_ids: [self.id], limit, offset, project_details: true };
+        const params: Record<string, unknown> = { bidders: [self.id], limit, offset, project_details: true };
         if (status) params.statuses = [status];
 
-        const result = await apiGet<{ bids: FreelancerBid[]; total_count: number }>("/projects/0.1/bids", params, account);
+        const result = await apiGet<{ bids: FreelancerBid[] }>("/projects/0.1/bids", params, account);
         if (!result.bids?.length) return { content: [{ type: "text", text: "No bids found." }] };
 
         const lines = [
-          `**Your bids** — ${result.total_count} total (showing ${result.bids.length}):`,
+          `**Your bids** — ${result.bids.length} shown (this page):`,
           "",
           ...result.bids.map((b, i) => formatBid(b, i + 1)),
         ];
         return {
           content: [{ type: "text", text: truncate(lines.join("\n"), CHARACTER_LIMIT) }],
-          structuredContent: { total: result.total_count, bids: result.bids },
+          structuredContent: { bids: result.bids },
         };
       } catch (err) {
         return mcpError((err as Error).message);
@@ -784,8 +831,11 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
       description:
         "Submit a bid / proposal on a Freelancer.com project. Automatically resolves and includes " +
         "your bidder_id from the account's own profile (required by the API, undocumented by the " +
-        "upstream package this was ported from). ⚠️ This creates a real bid on your account. Review " +
-        "before confirming — including which account, when multiple are configured.",
+        "upstream package this was ported from). ⚠️ `amount` is interpreted in the PROJECT'S OWN " +
+        "currency, not necessarily USD — freelancer.com is a global marketplace. Call " +
+        "freelancer_get_project first to confirm the project's currency_code before bidding, " +
+        "especially for projects outside USD (e.g. INR). This creates a real bid on your account. " +
+        "Review before confirming — including which account, when multiple are configured.",
       inputSchema: {
         project_id: z.number().int().positive().describe("Project ID to bid on"),
         amount: z.number().positive().describe("Bid amount in project currency"),
@@ -805,6 +855,16 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
     async ({ project_id, amount, period, description, milestone_percentage, account }) => {
       try {
         const self = await apiGet<{ id: number }>("/users/0.1/self", undefined, account);
+        // Se resuelve la moneda real del proyecto solo para mostrarla en la confirmación
+        // (evita el bug del paquete original de anteponer "$" a cifras que pueden ser
+        // otra moneda) -- no se usa para convertir `amount`, que ya viaja tal cual a la API.
+        const projectResult = await apiGet<{ projects: Record<string, FreelancerProject> }>(
+          "/projects/0.1/projects",
+          { projects: [project_id] },
+          account,
+        ).catch(() => null);
+        const currency = Object.values(projectResult?.projects ?? {})[0]?.currency?.code;
+
         const result = await apiPostJson<FreelancerBid>(
           "/projects/0.1/bids",
           { project_id, bidder_id: self.id, amount, period, description, milestone_percentage },
@@ -818,8 +878,8 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
                 "✅ **Bid placed successfully!**",
                 `Bid ID: ${result.id}`,
                 `Project: ${project_id}`,
-                `Amount: $${amount} | Delivery: ${period} days`,
-                `Status: ${result.status}`,
+                `Amount: ${amount} ${currency ?? "(project's own currency, unconfirmed)"} | Delivery: ${period} days`,
+                `Status: ${result.frontend_bid_status ?? "unknown"}`,
                 `Submitted: ${formatDate(result.time_submitted)}`,
               ].join("\n"),
             },
@@ -849,21 +909,26 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
     },
     async ({ project_id, account }) => {
       try {
-        const result = await apiGet<{ milestones: FreelancerMilestone[] }>(
+        // `result.milestones` es un dict keyed por id (no un array); `milestones_list`
+        // trae el mismo contenido como lista -- se acepta cualquiera de los dos shapes
+        // por si la API lo cambia entre cuentas/versiones, ya que no se pudo confirmar
+        // con un ejemplo real no vacío.
+        const result = await apiGet<{ milestones?: Record<string, FreelancerMilestone> | FreelancerMilestone[]; milestones_list?: FreelancerMilestone[] }>(
           "/projects/0.1/milestones",
-          { project_ids: [project_id] },
+          { projects: [project_id] },
           account,
         );
-        if (!result.milestones?.length) return { content: [{ type: "text", text: `No milestones found for project ${project_id}.` }] };
+        const milestones = result.milestones_list ?? (Array.isArray(result.milestones) ? result.milestones : Object.values(result.milestones ?? {}));
+        if (!milestones.length) return { content: [{ type: "text", text: `No milestones found for project ${project_id}.` }] };
 
         const lines = [
-          `**Milestones for project ${project_id}** (${result.milestones.length} total):`,
+          `**Milestones for project ${project_id}** (${milestones.length} total):`,
           "",
-          ...result.milestones.map((m, i) => formatMilestone(m, i + 1)),
+          ...milestones.map((m, i) => formatMilestone(m, i + 1)),
         ];
         return {
           content: [{ type: "text", text: truncate(lines.join("\n"), CHARACTER_LIMIT) }],
-          structuredContent: { milestones: result.milestones },
+          structuredContent: { milestones },
         };
       } catch (err) {
         return mcpError((err as Error).message);
@@ -891,17 +956,18 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
         const params: Record<string, unknown> = { limit, offset };
         if (context_type) params.context_types = [context_type];
 
-        const result = await apiGet<{ threads: FreelancerThread[]; total_count: number }>("/messages/0.1/threads", params, account);
+        // /messages/0.1/threads no devuelve total_count (confirmado en vivo).
+        const result = await apiGet<{ threads: FreelancerThread[] }>("/messages/0.1/threads", params, account);
         if (!result.threads?.length) return { content: [{ type: "text", text: "No message threads found." }] };
 
         const lines = [
-          `**Your inbox** — ${result.total_count} threads (showing ${result.threads.length}):`,
+          `**Your inbox** — ${result.threads.length} threads shown (this page):`,
           "",
           ...result.threads.map((t, i) => formatThread(t, i + 1)),
         ];
         return {
           content: [{ type: "text", text: truncate(lines.join("\n"), CHARACTER_LIMIT) }],
-          structuredContent: { total: result.total_count, threads: result.threads },
+          structuredContent: { threads: result.threads },
         };
       } catch (err) {
         return mcpError((err as Error).message);
@@ -927,7 +993,10 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
     async ({ thread_id: threadIdInput, limit, offset, account }) => {
       try {
         const thread_id = resolveThreadId(threadIdInput);
-        const result = await apiGet<{ messages: FreelancerMessage[]; total_count: number }>(
+        // /messages/0.1/messages devuelve `unfiltered_count`, no `total_count`
+        // (confirmado en vivo); no se usa por seguridad ya que su semántica exacta
+        // (¿incluye mensajes fuera del rango de fecha/borrados?) no está documentada.
+        const result = await apiGet<{ messages: FreelancerMessage[] }>(
           "/messages/0.1/messages",
           { threads: [thread_id], limit, offset },
           account,
@@ -935,13 +1004,13 @@ export function createFreelancerServer(accounts: Map<string, string>): McpServer
         if (!result.messages?.length) return { content: [{ type: "text", text: `No messages found in thread ${thread_id}.` }] };
 
         const lines = [
-          `**Thread ${thread_id}** — ${result.total_count} messages (showing ${result.messages.length}):`,
+          `**Thread ${thread_id}** — ${result.messages.length} messages shown (this page):`,
           "",
           ...result.messages.map((m) => formatMessage(m)),
         ];
         return {
           content: [{ type: "text", text: truncate(lines.join("\n"), CHARACTER_LIMIT) }],
-          structuredContent: { total: result.total_count, messages: result.messages },
+          structuredContent: { messages: result.messages },
         };
       } catch (err) {
         return mcpError((err as Error).message);
