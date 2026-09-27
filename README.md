@@ -196,12 +196,13 @@ Si `DBHUB_DSN` no está definido, este MCP se omite del arranque.
 ### `/cerebro` (local, reimplementación contra las APIs del ecosistema [cerebro](https://github.com/luisjdev0/cerebro), privado)
 
 A diferencia de `/appflowy`, `/dbhub` y `/analytics`, este MCP **no es un proxy a un
-sidecar**: el ecosistema cerebro (monorepo de 5 paquetes; antes un único paquete
+sidecar**: el ecosistema cerebro (monorepo de 7 paquetes; antes un único paquete
 `knowledgeos`) ya corre como sus propios servicios en otro lugar (ver `DEPLOY.md` de
 ese repo), y su cliente MCP oficial (`cerebro-mcp`) solo habla stdio. Como ese repo
 es privado y no se modifica desde aquí, `src/servers/cerebro` reimplementa los mismos
 tools hablando HTTP directo contra esas APIs — mismo contrato, mismos endpoints, sin
-lógica de negocio propia (vive toda en `cerebro-memory`/`cerebro-docs`):
+lógica de negocio propia (vive toda en `cerebro-memory`/`cerebro-docs`/`cerebro-flows`/
+`cerebro-auth`):
 
 - `memory_*` (siempre activas si el MCP está habilitado): `memory_search`,
   `memory_remember`, `memory_update`, `memory_forget`, `memory_link`,
@@ -210,8 +211,21 @@ lógica de negocio propia (vive toda en `cerebro-memory`/`cerebro-docs`):
   Postgres+pgvector).
 - `docs_*` (solo si `CEREBRO_DOCS_URL` está configurada): `docs_create_category`,
   `docs_categories`, `docs_save`, `docs_get`, `docs_search`, `docs_list`,
-  `docs_update`, `docs_patch_section`, `docs_delete` — contra la API de
+  `docs_update`, `docs_patch_section`, `docs_delete`, `docs_archive`,
+  `docs_unarchive`, `docs_list_archived`, `docs_history` — contra la API de
   `cerebro-docs` (repositorio de documentos Markdown completos, versionados).
+- `flow_*` (solo si `CEREBRO_FLOWS_URL` está configurada): `flow_create_category`,
+  `flow_categories`, `flow_validate`, `flow_save`, `flow_get`, `flow_list`,
+  `flow_update`, `flow_delete`, `flow_start`, `flow_next`,
+  `flow_approve_checkpoint`, `flow_reject_checkpoint`, `flow_abort` — contra la API
+  de `cerebro-flows` (procesos/checklists con pasos, decisiones y checkpoints de
+  aprobación).
+- `auth_*` (solo si `CEREBRO_AUTH_URL` está configurada): `auth_create_user`,
+  `auth_list_users`, `auth_create_group`, `auth_set_group_scopes`,
+  `auth_add_group_member`, `auth_create_token`, `auth_list_tokens`,
+  `auth_revoke_token` — contra la API de `cerebro-auth` (identidades, grupos y
+  tokens del ecosistema). **Ojo**: `auth_create_token` emite credenciales reales de
+  acceso — actívalas solo si vas a gestionar tokens/usuarios desde el MCP.
 
 Para activar `memory_*`:
 
@@ -228,9 +242,11 @@ Para activar `memory_*`:
 Si `CEREBRO_MEMORY_URL`/`KNOWLEDGEOS_API_URL` o `CEREBRO_TOKEN`/`KNOWLEDGEOS_API_TOKEN`
 no están definidos, todo el MCP `/cerebro` se omite del arranque.
 
-Para activar además `docs_*` (opcional, requiere `cerebro-docs` desplegado aparte):
-completa `CEREBRO_DOCS_URL` en `.env` (reusa el mismo `CEREBRO_TOKEN`). Si no está
-definida, `/cerebro` sigue funcionando solo con `memory_*`.
+Para activar además `docs_*`/`flow_*`/`auth_*` (opcionales, cada uno requiere su
+propio servicio desplegado aparte): completa `CEREBRO_DOCS_URL`/`CEREBRO_FLOWS_URL`/
+`CEREBRO_AUTH_URL` en `.env` (los tres reusan el mismo `CEREBRO_TOKEN`). Cada grupo
+de tools se activa de forma independiente -- si una de las tres no está definida,
+`/cerebro` sigue funcionando igual con el resto.
 
 ### `/freelancer` (local, port de [godesigntech/freelancer-mcp-server](https://github.com/godesigntech/freelancer-mcp-server), MIT)
 
